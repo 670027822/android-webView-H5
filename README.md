@@ -5,7 +5,7 @@
 #### 编译器
 (Android Studio)[https://developer.android.com/studio]
 
-#使用
+# 使用
 1、收藏项目，folk到自己仓库
 2、把 `app/java/com.example.test/MainActivity.java` 里面第137行的 `url` 改成你要打包的网页地址
 3、在app/res/values/strings.xml 中修改应用名称
