@@ -1,9 +1,12 @@
 # android-webView-H5
-使用安卓 webView 打包 H5 页面/网站，可以像 App 一样安装在安卓手机上
-
-公司前些天下来个需求说要把公司OA（网站）做成 App，于是就着以前的一些经验，东拼西凑，找人帮忙把包打好了
+在原开源项目的基础上进行完善，修改如下：
+1、增加了action，无需自己编译就可以folk以后利用github给你打包，方便没有条件编译的人使用
 
 #### 编译器
 (Android Studio)[https://developer.android.com/studio]
 
-这里的代码算是个完整的项目了，只需要把 `app/java/com.example.test/MainActivity.java` 里面第137行的 `url` 改成你要打包的网页地址就可以了
+#使用
+1、收藏项目，folk到自己仓库
+2、把 `app/java/com.example.test/MainActivity.java` 里面第137行的 `url` 改成你要打包的网页地址
+3、在app/res/values/strings.xml 中修改应用名称
+4、使用action功能打包后下载
