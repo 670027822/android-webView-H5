@@ -16,6 +16,7 @@ import android.provider.MediaStore;
 import android.view.KeyEvent;
 import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
+import android.webkit.JavascriptInterface;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -23,16 +24,22 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
+import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
 
 import androidx.appcompat.app.AppCompatActivity;
 
 import java.io.File;
+import java.util.HashMap;
+import java.util.Locale;
 import java.util.Objects;
 
 public class MainActivity extends AppCompatActivity {
 
     private WebView webView;
     private final int PICK_REQUEST = 10001;
+    private TextToSpeech textToSpeech;
+    private boolean textToSpeechReady = false;
     ValueCallback<Uri> mFilePathCallback;
     ValueCallback<Uri[]> mFilePathCallbackArray;
 
@@ -47,6 +54,8 @@ public class MainActivity extends AppCompatActivity {
         webView = findViewById(R.id.web_view);
         webView.getSettings().setJavaScriptEnabled(true);
         webView.setWebViewClient(new WebViewClient());
+        initNativeTextToSpeech();
+        webView.addJavascriptInterface(new NativeTtsBridge(), "NativeTTS");
         // code from https://blog.csdn.net/qq_21138819/article/details/56676007 by 欢子-3824
         webView.setWebChromeClient(new WebChromeClient() {
             // Andorid 4.1----4.4
@@ -131,6 +140,12 @@ public class MainActivity extends AppCompatActivity {
                 view.loadUrl(url);
                 return true;
             }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                injectSpeechSynthesisPolyfill();
+            }
         });
 
         // 这里填你需要打包的 H5 页面链接
@@ -163,9 +178,144 @@ public class MainActivity extends AppCompatActivity {
         Toast.makeText(getApplicationContext(), _s, Toast.LENGTH_SHORT).show();
     }
 
+    private void initNativeTextToSpeech() {
+        textToSpeech = new TextToSpeech(this, status -> {
+            textToSpeechReady = status == TextToSpeech.SUCCESS;
+            if (textToSpeechReady) {
+                int result = textToSpeech.setLanguage(Locale.CHINESE);
+                if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    textToSpeech.setLanguage(Locale.getDefault());
+                }
+                textToSpeech.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                    @Override
+                    public void onStart(String utteranceId) {
+                        notifySpeechEvent(utteranceId, "start", null);
+                    }
+
+                    @Override
+                    public void onDone(String utteranceId) {
+                        notifySpeechEvent(utteranceId, "end", null);
+                    }
+
+                    @Override
+                    public void onError(String utteranceId) {
+                        notifySpeechEvent(utteranceId, "error", "native-tts-error");
+                    }
+                });
+                notifyVoicesChanged();
+            }
+        });
+    }
+
+    private void notifySpeechEvent(String utteranceId, String eventName, String error) {
+        if (webView == null || utteranceId == null) return;
+        runOnUiThread(() -> webView.evaluateJavascript(
+                "window.__nativeTtsDispatch && window.__nativeTtsDispatch(" +
+                        escapeJsString(eventName) + "," +
+                        escapeJsString(utteranceId) + "," +
+                        escapeJsString(error) + ");",
+                null
+        ));
+    }
+
+    private void notifyVoicesChanged() {
+        if (webView == null) return;
+        runOnUiThread(() -> webView.evaluateJavascript(
+                "window.__nativeTtsVoicesChanged && window.__nativeTtsVoicesChanged();",
+                null
+        ));
+    }
+
+    private String escapeJsString(String value) {
+        if (value == null) return "null";
+        return "'" + value
+                .replace("\\", "\\\\")
+                .replace("'", "\\'")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r") + "'";
+    }
+
+    private void injectSpeechSynthesisPolyfill() {
+        if (webView == null) return;
+
+        String js = "(function(){" +
+                "if(!window.NativeTTS||window.__nativeTtsPolyfillInstalled)return;" +
+                "window.__nativeTtsPolyfillInstalled=true;" +
+                "var utterances={};var listeners={voiceschanged:[]};var speaking=false;var pending=false;" +
+                "function NativeSpeechSynthesisUtterance(text){this.text=text||'';this.lang='zh-CN';this.voice=null;this.volume=1;this.rate=1;this.pitch=1;this.onstart=null;this.onend=null;this.onerror=null;}" +
+                "var voice={voiceURI:'native-android-tts',name:'Android 系统语音',lang:'zh-CN',localService:true,default:true};" +
+                "function fire(type,id,error){var u=utterances[id];if(!u)return;var e={type:type,utterance:u,error:error||null};if(type==='start')speaking=true;if(type==='end'||type==='error'){speaking=false;pending=false;delete utterances[id];}var cb=u['on'+type];if(typeof cb==='function')cb.call(u,e);}" +
+                "window.__nativeTtsDispatch=fire;" +
+                "window.__nativeTtsVoicesChanged=function(){(listeners.voiceschanged||[]).slice().forEach(function(fn){try{fn.call(synth,{type:'voiceschanged'});}catch(e){}});};" +
+                "var synth={" +
+                "get speaking(){return speaking;},get pending(){return pending;},get paused(){return false;}," +
+                "getVoices:function(){return [voice];}," +
+                "speak:function(u){if(!u)return;var id='utt_'+Date.now()+'_'+Math.random().toString(16).slice(2);utterances[id]=u;pending=true;NativeTTS.speak(id,String(u.text||''),u.lang||(u.voice&&u.voice.lang)||'zh-CN',Number(u.rate)||1,Number(u.pitch)||1,Number(u.volume)||1);}," +
+                "cancel:function(){pending=false;speaking=false;utterances={};NativeTTS.cancel();}," +
+                "pause:function(){},resume:function(){NativeTTS.resume();}," +
+                "addEventListener:function(type,fn){if(!listeners[type])listeners[type]=[];listeners[type].push(fn);}," +
+                "removeEventListener:function(type,fn){var arr=listeners[type]||[];var i=arr.indexOf(fn);if(i>=0)arr.splice(i,1);}" +
+                "};" +
+                "window.SpeechSynthesisUtterance=NativeSpeechSynthesisUtterance;" +
+                "window.speechSynthesis=synth;" +
+                "setTimeout(function(){window.__nativeTtsVoicesChanged&&window.__nativeTtsVoicesChanged();},0);" +
+                "})();";
+        webView.evaluateJavascript(js, null);
+    }
+
+    private class NativeTtsBridge {
+        @JavascriptInterface
+        public void speak(String utteranceId, String text, String lang, float rate, float pitch, float volume) {
+            if (!textToSpeechReady || textToSpeech == null) {
+                notifySpeechEvent(utteranceId, "error", "native-tts-not-ready");
+                return;
+            }
+
+            Locale locale = Locale.CHINESE;
+            if (lang != null && lang.toLowerCase().startsWith("en")) {
+                locale = Locale.ENGLISH;
+            }
+            int languageResult = textToSpeech.setLanguage(locale);
+            if (languageResult == TextToSpeech.LANG_MISSING_DATA || languageResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                textToSpeech.setLanguage(Locale.getDefault());
+            }
+
+            textToSpeech.setSpeechRate(Math.max(0.1f, Math.min(rate, 3.0f)));
+            textToSpeech.setPitch(Math.max(0.1f, Math.min(pitch, 3.0f)));
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                Bundle params = new Bundle();
+                params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, Math.max(0.0f, Math.min(volume, 1.0f)));
+                textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId);
+            } else {
+                HashMap<String, String> params = new HashMap<>();
+                params.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId);
+                params.put(TextToSpeech.Engine.KEY_PARAM_VOLUME, String.valueOf(Math.max(0.0f, Math.min(volume, 1.0f))));
+                textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, params);
+            }
+        }
+
+        @JavascriptInterface
+        public void cancel() {
+            if (textToSpeech != null) {
+                textToSpeech.stop();
+            }
+        }
+
+        @JavascriptInterface
+        public void resume() {
+            // Android TextToSpeech 没有与 Web Speech API 完全对应的 resume，这里保留为空实现兼容 H5 调用。
+        }
+    }
+
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (textToSpeech != null) {
+            textToSpeech.stop();
+            textToSpeech.shutdown();
+            textToSpeech = null;
+        }
         webView.destroy();
         webView = null;
     }
